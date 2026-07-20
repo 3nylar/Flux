@@ -33,12 +33,15 @@ exist.
 
 ## Quickstart
 
-**1. Run the API** (see `api/README.md` for full detail):
+**1. Run the API** (see `api/README.md` for full detail, including every
+environment variable):
 ```bash
 cd api
 npm install
 docker compose up -d db
-cp .env.example .env
+# create .env with at least DATABASE_URL and DIRECT_URL pointing at the
+# docker-compose db (postgresql://flux:flux@localhost:5433/flux for both);
+# see api/README.md's "Deploying" section for the full variable list.
 npx prisma generate && npx prisma migrate deploy
 npm run keys:create -- --name "Local dev"   # save the printed flx_test_... key
 npm run dev
@@ -68,9 +71,11 @@ session there and it's saved to your real history.
 
 - **The meter engine** — a race-safe session state machine with drift-free
   tick scheduling, server-enforced safety ceilings, a payment-failure
-  circuit breaker, and restart-safe reconciliation on boot. 22 passing
-  tests cover these guarantees directly, including "no payment is ever
-  sent after stop" under real timing, and per-user session filtering.
+  circuit breaker, and downtime-safe recovery (a sweep that either resumes
+  or auto-stops a session, whichever a gap in ticking calls for). 23
+  passing tests cover these guarantees directly, including "no payment is
+  ever sent after stop" and never double-billing a session under
+  concurrent scheduling, plus per-user session filtering.
 - **A pluggable Lightning backend** — ships with a fully working simulated
   provider (real preimage/hash generation, configurable failure rate) and
   a real LND REST provider built to LND's documented keysend contract.
@@ -100,9 +105,18 @@ session there and it's saved to your real history.
   environment (none was reachable). `api/docs/LND_INTEGRATION.md` is both
   the setup guide (Polar regtest) and the verification checklist for
   closing that gap before trusting it with a node holding real funds.
-- The scheduler is single-process (in-memory timers + Postgres as source
-  of truth, reconciled on restart). It doesn't coordinate across multiple
-  API processes yet — see `api/docs/EXTENDING.md` for the scaling path.
+- The scheduler polls for due sessions and bills them (Postgres as source
+  of truth); it doesn't coordinate work across multiple API processes yet
+  — see `api/docs/EXTENDING.md` for the scaling path. What drives that
+  poll differs by deployment: an in-process interval on Docker/Node hosts
+  (sub-second), or a once-a-minute Vercel Cron job on the serverless
+  deployment.
+- On the Vercel deployment specifically, two things differ from
+  Docker/Node hosting, both documented in `api/README.md`'s "Known
+  simplifications": tick granularity is capped at ~60s (Vercel Cron's
+  minimum), and the live WebSocket session stream is unavailable (Vercel
+  functions can't hold a persistent connection) — clients poll
+  `GET /v1/sessions/{id}` instead, which is what `web/` already does.
 - Webhook delivery is single-attempt with no retry/backoff yet (every
   attempt is still logged, so nothing is silently lost).
 - The web app's settings page shows session *defaults* (rate/interval)

@@ -3,6 +3,7 @@ import { authenticate, requireScope } from "../middleware/auth.js";
 import { checkIdempotency, storeIdempotentResponse } from "../middleware/idempotency.js";
 import { parseOrThrow } from "./_helpers.js";
 import { prisma } from "../lib/prisma.js";
+import { env } from "../config/env.js";
 import {
   startSession,
   stopSession,
@@ -104,6 +105,22 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   );
 
   // --- Live streaming (WebSocket) ----------------------------------------
+  // Not available on the Vercel deployment (serverless functions can't
+  // hold a persistent connection) -- ENABLE_WEBSOCKET_STREAM is false
+  // there, and this route just points clients at polling instead.
+  if (!env.ENABLE_WEBSOCKET_STREAM) {
+    app.get("/v1/sessions/:id/stream", async (_req, reply) => {
+      reply.code(501).send({
+        error: {
+          code: "not_supported",
+          message:
+            "Real-time streaming isn't available on this deployment. Poll GET /v1/sessions/:id instead.",
+        },
+      });
+    });
+    return;
+  }
+
   // GET /v1/sessions/:id/stream?api_key=... -- API keys are normally sent
   // as a header, but browsers' native WebSocket API cannot set custom
   // headers, so this one endpoint also accepts the key as a query param.

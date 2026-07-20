@@ -14,11 +14,22 @@ import type { Session } from "@prisma/client";
  *
  * Design choices worth calling out explicitly:
  *
- *  - SCHEDULING: drift-free setTimeout chains, one per active session, kept
- *    in the `timers` map below. Each tick schedules its own successor based
- *    on elapsed wall-clock time rather than a naive setInterval, so a slow
- *    payment doesn't cause the meter to silently run fast or slow over a
- *    long session.
+ *  - SCHEDULING: there is no in-process timer. `sweepDueSessions()` polls
+ *    for every session whose `nextTickAt` is due and ticks it, and is meant
+ *    to be invoked repeatedly by an external driver -- a `setInterval` in
+ *    the self-hosted/Docker entrypoint (`server.ts`) for sub-minute
+ *    cadence, or a Vercel Cron job hitting `POST /internal/tick` once a
+ *    minute in the serverless deployment. Each session's own `nextTickAt`
+ *    is what drives cadence (set from elapsed wall-clock time, not a fixed
+ *    counter), so a slow payment doesn't cause the meter to silently run
+ *    fast or slow over a long session.
+ *
+ *  - CONCURRENCY SAFETY: before ticking a due session, `sweepDueSessions`
+ *    atomically claims it with a conditional update keyed on the
+ *    `nextTickAt` value it just read. If that update affects zero rows,
+ *    another concurrent sweep (e.g. overlapping cron invocations) already
+ *    claimed the session, and this pass skips it -- no session is ever
+ *    ticked twice for the same due tick.
  *
  *  - RACE SAFETY: every tick re-reads the session's `state` from the
  *    database immediately before sending a payment. A stop that lands a
@@ -26,19 +37,17 @@ import type { Session } from "@prisma/client";
  *    so "stop" and "tick" can never race into a payment being sent after
  *    the user asked to stop.
  *
- *  - RESTART SAFETY: on boot, `reconcileOnStartup` reloads every RUNNING
- *    session from the database and resumes its scheduler (or auto-stops it,
- *    if it's been silent long enough to be considered abandoned/orphaned --
- *    see STALE_SESSION_TIMEOUT_SECONDS). Nothing about correctness depends
- *    on the process staying up continuously.
+ *  - DOWNTIME SAFETY: any due session that's been silent longer than
+ *    STALE_SESSION_TIMEOUT_SECONDS (e.g. the whole deployment was down, or
+ *    -- on Vercel -- cron didn't fire for a while) is auto-stopped instead
+ *    of billed for the missed time, erring toward stopping billing rather
+ *    than silently continuing it after an outage.
  *
  *  - SERVER-ENFORCED CAPS: maxDurationSeconds and maxTotalSats are clamped
  *    server-side to the operator's configured ceilings regardless of what a
  *    client requests, so a compromised or buggy integrator can't cause
  *    unbounded spend.
  */
-
-const timers = new Map<string, NodeJS.Timeout>();
 
 export interface StartSessionParams {
   apiKeyId: string;
@@ -90,7 +99,6 @@ export async function startSession(params: StartSessionParams): Promise<Session>
   });
 
   void emitEvent(params.apiKeyId, "session.started", { session_id: session.id });
-  scheduleNextTick(session.id, 0);
   return session;
 }
 
@@ -106,8 +114,6 @@ export async function stopSession(
     // Idempotent: stopping an already-stopped session just returns it.
     return session;
   }
-
-  cancelTimer(sessionId);
 
   const updated = await prisma.session.update({
     where: { id: sessionId },
@@ -158,42 +164,76 @@ export async function listSessions(
 
 // --- Scheduler internals --------------------------------------------------
 
-function scheduleNextTick(sessionId: string, delayMs: number): void {
-  cancelTimer(sessionId);
-  const timer = setTimeout(() => {
-    void runTick(sessionId);
-  }, delayMs);
-  timer.unref?.(); // never block process exit on a pending tick
-  timers.set(sessionId, timer);
-}
+/** How long a claim on a due session is held before it'd become visible as due again. */
+const CLAIM_LOCK_MS = 30_000;
 
-function cancelTimer(sessionId: string): void {
-  const existing = timers.get(sessionId);
-  if (existing) {
-    clearTimeout(existing);
-    timers.delete(sessionId);
+/**
+ * Find every session due for a tick, claim each one atomically, and either
+ * tick it or auto-stop it if it's gone stale. Meant to be invoked
+ * repeatedly by an external driver -- see the module doc comment above.
+ */
+export async function sweepDueSessions(): Promise<{ ticked: number; autoStopped: number }> {
+  const due = await prisma.session.findMany({
+    where: { state: { in: ["RUNNING", "DEGRADED"] }, nextTickAt: { lte: new Date() } },
+  });
+
+  let ticked = 0;
+  let autoStopped = 0;
+
+  for (const session of due) {
+    if (!(await claimSession(session))) continue; // another concurrent sweep already took it
+
+    const staleMs = session.nextTickAt
+      ? Date.now() - session.nextTickAt.getTime()
+      : Number.POSITIVE_INFINITY;
+
+    if (staleMs > env.STALE_SESSION_TIMEOUT_SECONDS * 1000) {
+      await autoStop(session, "orphaned_after_downtime");
+      autoStopped++;
+      continue;
+    }
+
+    await tickSession(session);
+    ticked++;
   }
+
+  return { ticked, autoStopped };
 }
 
-async function runTick(sessionId: string): Promise<void> {
+/**
+ * Atomically claim a due session before acting on it, using its own
+ * `nextTickAt` as an implicit optimistic-concurrency version: the update
+ * only succeeds if `nextTickAt` still matches the value just read, so two
+ * overlapping sweeps can never both claim (and double-tick) the same
+ * session.
+ */
+async function claimSession(session: Session): Promise<boolean> {
+  const claim = await prisma.session.updateMany({
+    where: { id: session.id, nextTickAt: session.nextTickAt },
+    data: { nextTickAt: new Date(Date.now() + CLAIM_LOCK_MS) },
+  });
+  return claim.count === 1;
+}
+
+async function tickSession(session: Session): Promise<void> {
   // Re-read state immediately before acting -- this is the guard that makes
   // stop() and tick() race-safe (see module doc comment above).
-  const session = await prisma.session.findUnique({ where: { id: sessionId } });
-  if (!session || (session.state !== "RUNNING" && session.state !== "DEGRADED")) {
-    return; // stopped, failed, or deleted between scheduling and firing
+  const current = await prisma.session.findUnique({ where: { id: session.id } });
+  if (!current || (current.state !== "RUNNING" && current.state !== "DEGRADED")) {
+    return; // stopped, failed, or deleted between claiming and ticking
   }
 
   // Safety ceilings, enforced every tick regardless of what was true at
   // session start (covers config changes / clock skew edge cases too).
-  const elapsedSeconds = session.startedAt
-    ? (Date.now() - session.startedAt.getTime()) / 1000
+  const elapsedSeconds = current.startedAt
+    ? (Date.now() - current.startedAt.getTime()) / 1000
     : 0;
-  if (elapsedSeconds >= session.maxDurationSeconds) {
-    await autoStop(session, "max_duration_reached");
+  if (elapsedSeconds >= current.maxDurationSeconds) {
+    await autoStop(current, "max_duration_reached");
     return;
   }
-  if (session.totalSats + session.ratePerTickSats > session.maxTotalSats) {
-    await autoStop(session, "max_total_sats_reached");
+  if (current.totalSats + current.ratePerTickSats > current.maxTotalSats) {
+    await autoStop(current, "max_total_sats_reached");
     return;
   }
 
@@ -201,21 +241,21 @@ async function runTick(sessionId: string): Promise<void> {
 
   try {
     const balance = await provider.getWalletBalanceSats();
-    if (balance < session.ratePerTickSats) {
-      await autoStop(session, "insufficient_wallet_balance");
+    if (balance < current.ratePerTickSats) {
+      await autoStop(current, "insufficient_wallet_balance");
       return;
     }
 
     const result = await provider.sendKeysend({
-      destPubkey: session.receiverPubkey,
-      amountSats: session.ratePerTickSats,
+      destPubkey: current.receiverPubkey,
+      amountSats: current.ratePerTickSats,
     });
 
     await prisma.$transaction([
       prisma.payment.create({
         data: {
-          sessionId: session.id,
-          amountSats: session.ratePerTickSats,
+          sessionId: current.id,
+          amountSats: current.ratePerTickSats,
           status: "SUCCEEDED",
           paymentHash: result.paymentHash,
           preimage: result.preimage,
@@ -224,27 +264,25 @@ async function runTick(sessionId: string): Promise<void> {
         },
       }),
       prisma.session.update({
-        where: { id: session.id },
+        where: { id: current.id },
         data: {
-          totalSats: { increment: session.ratePerTickSats },
+          totalSats: { increment: current.ratePerTickSats },
           consecutiveFailures: 0,
           state: "RUNNING",
           lastTickAt: new Date(),
-          nextTickAt: new Date(Date.now() + session.tickIntervalSeconds * 1000),
+          nextTickAt: new Date(Date.now() + current.tickIntervalSeconds * 1000),
         },
       }),
     ]);
 
-    void emitEvent(session.apiKeyId, "payment.sent", {
-      session_id: session.id,
-      amount_sats: session.ratePerTickSats,
+    void emitEvent(current.apiKeyId, "payment.sent", {
+      session_id: current.id,
+      amount_sats: current.ratePerTickSats,
       payment_hash: result.paymentHash,
-      total_sats: session.totalSats + session.ratePerTickSats,
+      total_sats: current.totalSats + current.ratePerTickSats,
     });
-
-    scheduleNextTick(session.id, session.tickIntervalSeconds * 1000);
   } catch (err) {
-    await handleTickFailure(session, err);
+    await handleTickFailure(current, err);
   }
 }
 
@@ -273,19 +311,20 @@ async function handleTickFailure(session: Session, err: unknown): Promise<void> 
     return;
   }
 
+  // Retry at the same interval on the next sweep; a real deployment might
+  // back off exponentially here, but a fixed retry keeps the meter's
+  // billing cadence predictable for the integrator.
   await prisma.session.update({
     where: { id: session.id },
-    data: { state: "DEGRADED", consecutiveFailures },
+    data: {
+      state: "DEGRADED",
+      consecutiveFailures,
+      nextTickAt: new Date(Date.now() + session.tickIntervalSeconds * 1000),
+    },
   });
-
-  // Retry with the same interval; a real deployment might back off
-  // exponentially here, but a fixed retry keeps the meter's billing
-  // cadence predictable for the integrator.
-  scheduleNextTick(session.id, session.tickIntervalSeconds * 1000);
 }
 
 async function autoStop(session: Session, reason: string): Promise<void> {
-  cancelTimer(session.id);
   await prisma.session.update({
     where: { id: session.id },
     data: { state: "FAILED", stoppedAt: new Date(), stopReason: reason },
@@ -295,40 +334,4 @@ async function autoStop(session: Session, reason: string): Promise<void> {
     reason,
     total_sats: session.totalSats,
   });
-}
-
-/**
- * Resume every RUNNING/DEGRADED session on process boot. A session whose
- * next tick is further in the past than STALE_SESSION_TIMEOUT_SECONDS is
- * treated as orphaned (the process was down long enough that "continuing
- * to bill" would be a surprise to the integrator) and is auto-stopped
- * instead of resumed -- erring toward stopping billing rather than
- * silently continuing it after an outage.
- */
-export async function reconcileOnStartup(): Promise<void> {
-  const active = await prisma.session.findMany({
-    where: { state: { in: ["RUNNING", "DEGRADED"] } },
-  });
-
-  for (const session of active) {
-    const staleMs = session.nextTickAt
-      ? Date.now() - session.nextTickAt.getTime()
-      : Number.POSITIVE_INFINITY;
-
-    if (staleMs > env.STALE_SESSION_TIMEOUT_SECONDS * 1000) {
-      await autoStop(session, "orphaned_after_restart");
-      continue;
-    }
-
-    const delay = session.nextTickAt
-      ? Math.max(0, session.nextTickAt.getTime() - Date.now())
-      : 0;
-    scheduleNextTick(session.id, delay);
-  }
-}
-
-/** Test-only: cancel every scheduled timer, for clean test teardown. */
-export function __clearAllTimersForTests(): void {
-  for (const timer of timers.values()) clearTimeout(timer);
-  timers.clear();
 }

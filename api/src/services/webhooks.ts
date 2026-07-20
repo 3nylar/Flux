@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../lib/prisma.js";
 
 export type FluxEventType =
@@ -52,7 +53,7 @@ async function deliver(
   const signature = createHmac("sha256", secret).update(body).digest("hex");
 
   const delivery = await prisma.webhookDelivery.create({
-    data: { webhookId, eventType, payload, status: "PENDING" },
+    data: { webhookId, eventType, payload: payload as Prisma.InputJsonValue, status: "PENDING" },
   });
 
   try {

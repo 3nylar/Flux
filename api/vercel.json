@@ -1,0 +1,10 @@
+{
+  "buildCommand": "npx prisma generate && npx prisma migrate deploy",
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "docs/**"
+    }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
+  "crons": [{ "path": "/internal/tick", "schedule": "0 0 * * *" }]
+}

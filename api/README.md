@@ -15,9 +15,11 @@ extend it without touching the core engine.
 - **The meter engine** (`src/services/meterEngine.ts`) — a race-safe
   session state machine with drift-free tick scheduling, server-enforced
   safety ceilings (max duration, max total sats), a payment-failure circuit
-  breaker, and restart-safe reconciliation on boot. **20 passing tests**
-  cover every one of these guarantees, including "no payment is ever sent
-  after stop" under realistic timing.
+  breaker, and a downtime-safe due-session sweep (auto-stops anything
+  silent longer than `STALE_SESSION_TIMEOUT_SECONDS` instead of billing
+  through the gap). **23 passing tests** cover every one of these
+  guarantees, including "no payment is ever sent after stop" and no
+  session ever billed twice for one due tick under concurrent sweeps.
 - **A pluggable Lightning backend** (`src/providers/`) — ships with a fully
   working `SimulatedLightningProvider` (zero infrastructure required, real
   preimage/hash generation, configurable latency and failure rate for
@@ -107,7 +109,32 @@ automatically.
 **Any Node host (Railway, Render, Fly.io, a VPS):** build with
 `npm run build`, run with `npm start`, provide a real Postgres
 `DATABASE_URL`, and run `npx prisma migrate deploy` once before first
-boot (or as a release-phase command, if your host supports one).
+boot (or as a release-phase command, if your host supports one). These
+deployments keep the exact behavior described above: sub-minute ticking
+via an in-process interval, and the live WebSocket stream.
+
+**Vercel:** the API is re-architected for serverless here (`index.ts` +
+`vercel.json`), with two real behavior changes from the Docker/Node-host
+path — see "Known simplifications" below. Steps:
+
+1. Provision a Postgres database that supports both a pooled and an
+   unpooled connection string (e.g. Vercel Postgres / Neon) and set
+   `DATABASE_URL` (pooled) and `DIRECT_URL` (unpooled — Prisma Migrate
+   needs it) in the Vercel project's env vars.
+2. Provision a Redis instance (e.g. Upstash, via Vercel's marketplace) and
+   set `REDIS_URL`, so rate limiting works correctly across serverless
+   instances instead of falling back to a per-process in-memory store.
+3. Set `CRON_SECRET` (16+ random characters) — Vercel sends it back as
+   `Authorization: Bearer $CRON_SECRET` when it invokes the cron job
+   defined in `vercel.json` (`POST /internal/tick`, once a minute), which
+   is what drives billing ticks in place of the in-process interval.
+4. Set `ENABLE_WEBSOCKET_STREAM=false` and `MIN_TICK_INTERVAL_SECONDS=60`
+   (see below for why).
+5. Set the rest of the usual vars (`LIGHTNING_PROVIDER`, `PUBLIC_BASE_URL`
+   to the deployed URL, etc.), then deploy. `vercel.json`'s `buildCommand`
+   runs `prisma generate` and `prisma migrate deploy` for you.
+6. Mint the first API key by pulling the production `DATABASE_URL` locally
+   (`vercel env pull`) and running `npm run keys:create` once.
 
 ## Security notes
 
@@ -149,7 +176,7 @@ docs/
   EXTENDING.md                  where to plug in scaling / pub-sub / retries
   TESTING.md                    how to actually verify all of this
 test/
-  meterEngine.test.ts            20 tests covering the core guarantees
+  meterEngine.test.ts            23 tests covering the core guarantees
   fakePrisma.ts                  in-memory test double, not a real DB
 prisma/schema.prisma
 docker-compose.yml
@@ -158,11 +185,26 @@ Dockerfile
 
 ## Known simplifications (documented, not accidental)
 
-- **Single-process scheduler.** Ticks are scheduled with in-process
-  timers, keyed by session ID, reconciled on boot from Postgres. This
-  needs nothing but Postgres and is restart-safe, but doesn't coordinate
-  across multiple API processes. See `docs/EXTENDING.md` for the BullMQ
-  upgrade path.
+- **Polling scheduler, not pub/sub.** `sweepDueSessions()` (in
+  `src/services/meterEngine.ts`) finds every session due for a tick and
+  bills it, driven by a plain `setInterval` on Docker/Node hosts (sub-second
+  polling) or by Vercel Cron on the serverless deployment (once a minute,
+  Vercel Cron's minimum granularity). Either way it needs nothing but
+  Postgres and is downtime-safe: a session silent longer than
+  `STALE_SESSION_TIMEOUT_SECONDS` is auto-stopped instead of billed for the
+  gap. See `docs/EXTENDING.md` for the BullMQ upgrade path if you need
+  true sub-second billing across multiple coordinating processes.
+- **On Vercel specifically, tick granularity is capped at ~60s.** Set
+  `MIN_TICK_INTERVAL_SECONDS=60` there (the local/Docker default stays 1)
+  — Vercel Cron can't fire more often than once a minute, so a faster
+  configured interval would just mean a session accumulates multiple due
+  ticks between cron runs rather than billing precisely on schedule.
+- **On Vercel specifically, the WebSocket stream is unavailable.**
+  Serverless functions can't hold a persistent connection, so
+  `ENABLE_WEBSOCKET_STREAM=false` there and `GET /v1/sessions/{id}/stream`
+  returns `501`. Poll `GET /v1/sessions/{id}` instead — this is the only
+  behavior difference the reference `web/` dashboard cares about, and it
+  already does exactly that (see `web/lib/fluxServer.ts`).
 - **Webhook delivery is single-attempt.** Every attempt is logged
   (`WebhookDelivery`), so nothing is silently lost, but there's no
   retry/backoff yet.

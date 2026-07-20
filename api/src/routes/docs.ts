@@ -5,12 +5,26 @@ import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// Local/Docker runs compiled output from dist/routes, two levels below the
+// package root. Vercel's own bundler for index.ts doesn't preserve that
+// layout, but does run with cwd at the project root, so docs/openapi.yaml
+// is reachable from there instead (see vercel.json's includeFiles).
+const candidatePaths = [
+  join(__dirname, "..", "..", "docs", "openapi.yaml"),
+  join(process.cwd(), "docs", "openapi.yaml"),
+];
+
 export async function docsRoutes(app: FastifyInstance): Promise<void> {
-  const specPath = join(__dirname, "..", "..", "docs", "openapi.yaml");
   let spec = "";
-  try {
-    spec = readFileSync(specPath, "utf8");
-  } catch {
+  for (const specPath of candidatePaths) {
+    try {
+      spec = readFileSync(specPath, "utf8");
+      break;
+    } catch {
+      continue;
+    }
+  }
+  if (!spec) {
     spec = "openapi: 3.1.0\ninfo:\n  title: Flux API\n  version: '1.0.0'\npaths: {}\n";
   }
 

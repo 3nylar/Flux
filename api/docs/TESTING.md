@@ -28,8 +28,9 @@ full stack against a real database at least once:
 
 ```bash
 docker compose up -d db
-cp .env.example .env
-# .env's DATABASE_URL already points at the docker-compose db by default
+# create .env with DATABASE_URL and DIRECT_URL both pointing at the
+# docker-compose db (postgresql://flux:flux@localhost:5433/flux) -- see
+# the README's "Deploying" section for the full variable list.
 npx prisma migrate deploy
 npm run dev
 ```
@@ -41,8 +42,8 @@ examples, or import docs/openapi.yaml into Postman/Insomnia) and confirm:
   `docker compose exec db psql -U flux -d flux -c 'select * from "Session";'`
 - Restarting the API process (Ctrl+C, `npm run dev` again) while a
   session is running does NOT cause a double-payment or a stuck
-  session -- watch `reconcileOnStartup`'s log line and confirm billing
-  resumes on schedule.
+  session -- `sweepDueSessions()` picks it back up on the next interval
+  tick and confirms billing resumes on schedule.
 
 ## Testing against a real Lightning node
 

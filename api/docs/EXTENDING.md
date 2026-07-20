@@ -24,32 +24,48 @@ needs to change.
 
 ## Scale the scheduler past a single process
 
-The reference scheduler (`src/services/meterEngine.ts`) uses in-process
-`setTimeout` chains keyed by session ID, with Postgres as the durable
-source of truth. This is intentionally simple -- it needs nothing but
-Postgres, and `reconcileOnStartup()` makes it safe across restarts. It does
-**not** coordinate across multiple API instances: if you run more than one
-process, each would try to schedule ticks for the same sessions.
+The reference scheduler (`sweepDueSessions()` in
+`src/services/meterEngine.ts`) polls Postgres for every session due for a
+tick, driven either by an in-process `setInterval` (Docker/Node hosts) or
+Vercel Cron (the serverless deployment). Postgres is the durable source of
+truth, and a session silent longer than `STALE_SESSION_TIMEOUT_SECONDS` is
+auto-stopped instead of billed through the gap, so nothing about
+correctness depends on any one process staying up continuously.
 
-To scale horizontally:
+It **does** already coordinate safely across multiple concurrent callers:
+each due session is claimed with a conditional update keyed on its current
+`nextTickAt` before being ticked, so two overlapping sweeps (multiple API
+instances, or overlapping cron/interval runs) can never both bill the same
+due tick. What it does *not* do is distribute the *work* of a full sweep
+across instances -- every instance still scans the entire due-sessions
+table each pass, which is fine at reference scale but wasteful once you
+have many concurrent sessions and multiple instances.
+
+To scale further:
 
 1. Introduce a job queue (BullMQ + Redis is a natural fit, matching the
-   PRD's original scaling path) and move tick scheduling into queued jobs
-   instead of in-memory timers.
-2. Use the queue's own locking/dedup features (e.g. BullMQ's job IDs) in
-   place of the `timers` Map.
-3. `reconcileOnStartup()` becomes unnecessary -- the queue itself survives
-   restarts.
+   PRD's original scaling path) and move tick execution into queued jobs,
+   partitioned across workers, instead of every instance polling the whole
+   table.
+2. Use the queue's own locking/dedup features (e.g. BullMQ's job IDs) as
+   the claim mechanism instead of the `nextTickAt` conditional update.
+3. The stale-session sweep folds naturally into the same queue-driven
+   model -- a job that doesn't run within its expected window is exactly
+   what the queue's own retry/dead-letter handling is for.
 
 ## Add a real pub/sub layer for /stream
 
-The WebSocket endpoint (`GET /v1/sessions/:id/stream`) currently
-poll-and-diffs the database every second per connected client, to keep the
-reference implementation dependency-free. At meaningful scale, replace the
-`setInterval` polling loop in `src/routes/sessions.ts` with a subscription
-to whatever emits session-changed events in your deployment (Postgres
-LISTEN/NOTIFY, a Redis pub/sub channel, or the same queue from the point
-above).
+On deployments that support it (`ENABLE_WEBSOCKET_STREAM=true` -- Docker
+and other Node hosts, not Vercel, since serverless functions can't hold a
+persistent connection), the WebSocket endpoint
+(`GET /v1/sessions/:id/stream`) currently poll-and-diffs the database
+every second per connected client, to keep the reference implementation
+dependency-free. At meaningful scale, replace the `setInterval` polling
+loop in `src/routes/sessions.ts` with a subscription to whatever emits
+session-changed events in your deployment (Postgres LISTEN/NOTIFY, a Redis
+pub/sub channel, or the same queue from the point above). On Vercel, this
+endpoint isn't available at all; clients poll `GET /v1/sessions/:id`
+instead (see `api/README.md`'s "Known simplifications").
 
 ## Harden webhook delivery
 

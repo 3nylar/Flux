@@ -240,7 +240,7 @@ paths:
   /v1/sessions/{id}/stream:
     get:
       tags: [Sessions]
-      summary: Live session updates (WebSocket)
+      summary: Live session updates (WebSocket, self-hosted deployments only)
       description: >
         Upgrade to a WebSocket for live push updates as the session's total
         and state change, instead of polling `GET /v1/sessions/{id}`.
@@ -253,6 +253,13 @@ paths:
         then a `session.update` message every time the total or state
         changes, until the session reaches a terminal state (`stopped` or
         `failed`), at which point the socket closes.
+
+
+        **Not available on the Vercel deployment** — serverless functions
+        can't hold a persistent connection. There, `ENABLE_WEBSOCKET_STREAM`
+        is `false` and this endpoint returns `501` instead of upgrading;
+        poll `GET /v1/sessions/{id}` (e.g. every 1–2s) to get the same
+        information there.
       parameters:
         - $ref: "#/components/parameters/SessionId"
         - name: api_key
@@ -262,6 +269,11 @@ paths:
       responses:
         "101":
           description: Switching protocols to WebSocket.
+        "501":
+          description: >
+            Streaming isn't available on this deployment
+            (`ENABLE_WEBSOCKET_STREAM=false`). Poll `GET /v1/sessions/{id}`
+            instead.
   /v1/webhooks:
     post:
       tags: [Webhooks]

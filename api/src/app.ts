@@ -8,10 +8,12 @@ import { env } from "./config/env.js";
 import { ApiError } from "./lib/errors.js";
 import { hashApiKey } from "./lib/apiKeys.js";
 import { prisma } from "./lib/prisma.js";
+import { redis } from "./lib/redis.js";
 import { sessionRoutes } from "./routes/sessions.js";
 import { webhookRoutes } from "./routes/webhooks.js";
 import { metaRoutes } from "./routes/meta.js";
 import { docsRoutes } from "./routes/docs.js";
+import { internalRoutes } from "./routes/internal.js";
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
@@ -26,11 +28,17 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, { origin: true });
-  await app.register(websocket);
+  if (env.ENABLE_WEBSOCKET_STREAM) {
+    await app.register(websocket);
+  }
 
   await app.register(rateLimit, {
     max: env.RATE_LIMIT_MAX,
     timeWindow: env.RATE_LIMIT_WINDOW_MS,
+    // Redis-backed when REDIS_URL is set (required for correct limiting
+    // across multiple serverless instances); falls back to the in-memory
+    // default store otherwise, which is fine for a single-process self-host.
+    ...(redis ? { redis } : {}),
     keyGenerator: (req) => {
       const auth = req.headers["authorization"];
       if (auth?.startsWith("Bearer ")) return `key:${hashApiKey(auth.slice(7).trim())}`;
@@ -87,6 +95,7 @@ export async function buildApp(): Promise<FastifyInstance> {
   await app.register(docsRoutes);
   await app.register(sessionRoutes);
   await app.register(webhookRoutes);
+  await app.register(internalRoutes);
 
   app.addHook("onClose", async () => {
     await prisma.$disconnect();

@@ -9,8 +9,12 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // Pooled connection strings (e.g. Neon/Vercel Postgres via PgBouncer)
+  // can't run migrations; DIRECT_URL is the unpooled connection Prisma
+  // Migrate uses instead. Unset locally, DATABASE_URL is used for both.
+  directUrl = env("DIRECT_URL")
 }
 
 /// An API key issued to an integrator. Only a SHA-256 hash of the raw key

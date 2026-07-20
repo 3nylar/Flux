@@ -15,6 +15,12 @@ import { z } from "zod";
  */
 const providerSchema = z.enum(["simulated", "lnd"]);
 
+// .env files in this project represent "not configured" as `KEY=` (an
+// empty string), not an absent key -- treat that the same as unset for
+// every optional field below rather than failing its validator on "".
+const optionalString = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(8081),
@@ -25,12 +31,11 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
 
   LIGHTNING_PROVIDER: providerSchema.default("simulated"),
-  LND_REST_URL: z.string().url().optional(),
-  LND_MACAROON_HEX: z
-    .string()
-    .regex(/^[a-fA-F0-9]+$/, "LND_MACAROON_HEX must be hex-encoded")
-    .optional(),
-  LND_TLS_CERT_BASE64: z.string().optional(),
+  LND_REST_URL: optionalString(z.string().url()),
+  LND_MACAROON_HEX: optionalString(
+    z.string().regex(/^[a-fA-F0-9]+$/, "LND_MACAROON_HEX must be hex-encoded")
+  ),
+  LND_TLS_CERT_BASE64: optionalString(z.string()),
 
   // Simulated-provider tuning, useful for exercising failure handling in
   // tests and demos without a real node.
@@ -48,8 +53,26 @@ const envSchema = z.object({
 
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
+  // ioredis connection string for a shared rate-limit store. Required in
+  // production so limits are enforced correctly across multiple serverless
+  // instances/processes rather than per-process in memory.
+  REDIS_URL: optionalString(z.string().min(1)),
 
-  WEBHOOK_SIGNING_SECRET: z.string().min(16).optional(),
+  WEBHOOK_SIGNING_SECRET: optionalString(z.string().min(16)),
+
+  // Shared secret Vercel Cron sends as `Authorization: Bearer <value>` when
+  // invoking POST /internal/tick. Required in production (the serverless
+  // deployment has no other way to schedule ticks).
+  CRON_SECRET: optionalString(z.string().min(16)),
+
+  // The WebSocket stream endpoint (/v1/sessions/:id/stream) needs a
+  // persistent connection, which Vercel serverless functions can't provide.
+  // Set to false on Vercel; the route then returns 501 with guidance to
+  // poll GET /v1/sessions/:id instead.
+  ENABLE_WEBSOCKET_STREAM: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
 });
 
 function loadEnv() {

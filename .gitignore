@@ -4,7 +4,8 @@ node_modules/
 .pnp.js
 
 # Environment variables
-.env
+.env*
+.env.example*
 .env.local
 .env.*.local
 
@@ -42,3 +43,6 @@ Thumbs.db
 
 # Vercel
 .vercel
+
+.vercel
+.env*

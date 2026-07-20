@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createFakePrisma } from "./fakePrisma.js";
 
 const fakePrisma = createFakePrisma();
 
 vi.mock("../src/lib/prisma.js", () => ({ prisma: fakePrisma }));
 
-const { startSession, stopSession, getSession, listSessions, reconcileOnStartup, __clearAllTimersForTests } =
+const { startSession, stopSession, getSession, listSessions, sweepDueSessions } =
   await import("../src/services/meterEngine.js");
 const { __setLightningProviderForTests } = await import("../src/providers/index.js");
 const { SimulatedLightningProvider } = await import(
@@ -15,8 +15,12 @@ const { SimulatedLightningProvider } = await import(
 const API_KEY_ID = "key_1";
 const VALID_PUBKEY = "02" + "ab".repeat(32);
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Force a session's next tick into the past, as if its interval had elapsed. */
+async function forceDue(sessionId: string): Promise<void> {
+  await fakePrisma.session.update({
+    where: { id: sessionId },
+    data: { nextTickAt: new Date(Date.now() - 10) },
+  });
 }
 
 beforeEach(() => {
@@ -28,12 +32,8 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
-  __clearAllTimersForTests();
-});
-
 describe("startSession", () => {
-  it("creates a RUNNING session and begins billing on the configured cadence", async () => {
+  it("creates a RUNNING session, due for a tick immediately", async () => {
     const session = await startSession({
       apiKeyId: API_KEY_ID,
       externalUserId: "user_1",
@@ -45,8 +45,7 @@ describe("startSession", () => {
     expect(session.state).toBe("RUNNING");
     expect(session.totalSats).toBe(0);
 
-    // Let the first tick (scheduled at delay 0) fire.
-    await sleep(150);
+    await sweepDueSessions();
 
     const updated = await getSession(API_KEY_ID, session.id);
     expect(updated.totalSats).toBe(10);
@@ -93,13 +92,14 @@ describe("stopSession", () => {
       tickIntervalSeconds: 1,
     });
 
-    // Stop synchronously, before the delay-0 first tick has a chance to run.
+    // Stop before any sweep has a chance to tick it.
     const stopped = await stopSession(API_KEY_ID, session.id);
     expect(stopped.state).toBe("STOPPED");
 
-    // Wait well past when a tick (or several) would have fired if billing
-    // had continued.
-    await sleep(1200);
+    // A sweep now (or any number of them) must never bill a stopped session,
+    // even though it was due at the moment it was stopped.
+    await sweepDueSessions();
+    await sweepDueSessions();
 
     const final = await getSession(API_KEY_ID, session.id);
     expect(final.totalSats).toBe(0);
@@ -127,12 +127,15 @@ describe("stopSession", () => {
       ratePerTickSats: 10,
       tickIntervalSeconds: 1,
     });
-    await sleep(150); // let the first tick land
+    await sweepDueSessions(); // let the first tick land
     await stopSession(API_KEY_ID, session.id);
     const totalAtStop = (await getSession(API_KEY_ID, session.id)).totalSats;
     expect(totalAtStop).toBeGreaterThan(0);
 
-    await sleep(1200); // past when a second tick would fire
+    // Simulate a second interval having elapsed, then sweep again -- a
+    // stopped session is excluded from the due query regardless.
+    await forceDue(session.id);
+    await sweepDueSessions();
     const final = await getSession(API_KEY_ID, session.id);
     expect(final.totalSats).toBe(totalAtStop); // unchanged after stop
   });
@@ -149,9 +152,13 @@ describe("safety ceilings", () => {
       maxTotalSats: 100, // allows at most 2 ticks (40 + 40 = 80; a 3rd would hit 120 > 100)
     });
 
-    await sleep(4000); // enough real time for ~2-3 tick cycles with margin
+    let final = await getSession(API_KEY_ID, session.id);
+    for (let i = 0; i < 5 && final.state !== "FAILED"; i++) {
+      await forceDue(session.id);
+      await sweepDueSessions();
+      final = await getSession(API_KEY_ID, session.id);
+    }
 
-    const final = await getSession(API_KEY_ID, session.id);
     expect(final.state).toBe("FAILED");
     expect(final.stopReason).toBe("max_total_sats_reached");
     expect(final.totalSats).toBeLessThanOrEqual(100);
@@ -167,7 +174,13 @@ describe("safety ceilings", () => {
       maxDurationSeconds: 1,
     });
 
-    await sleep(3500);
+    // Simulate the session having started 2 seconds ago rather than
+    // actually waiting for real time to pass.
+    await fakePrisma.session.update({
+      where: { id: session.id },
+      data: { startedAt: new Date(Date.now() - 2000) },
+    });
+    await sweepDueSessions();
 
     const final = await getSession(API_KEY_ID, session.id);
     expect(final.state).toBe("FAILED");
@@ -190,9 +203,13 @@ describe("payment failure handling (circuit breaker)", () => {
     });
 
     // test/setup.ts sets MAX_CONSECUTIVE_PAYMENT_FAILURES=3
-    await sleep(3600);
+    let final = await getSession(API_KEY_ID, session.id);
+    for (let i = 0; i < 5 && final.state !== "FAILED"; i++) {
+      await forceDue(session.id);
+      await sweepDueSessions();
+      final = await getSession(API_KEY_ID, session.id);
+    }
 
-    const final = await getSession(API_KEY_ID, session.id);
     expect(final.state).toBe("FAILED");
     expect(final.stopReason).toContain("payment_failures_exceeded");
     expect(final.totalSats).toBe(0); // no successful payments were ever recorded
@@ -256,8 +273,8 @@ describe("listSessions filtering", () => {
   });
 });
 
-describe("reconcileOnStartup", () => {
-  it("resumes a RUNNING session whose next tick is recent", async () => {
+describe("sweepDueSessions", () => {
+  it("ticks a RUNNING session whose next tick is recent", async () => {
     const row = await fakePrisma.session.create({
       data: {
         apiKeyId: API_KEY_ID,
@@ -275,12 +292,13 @@ describe("reconcileOnStartup", () => {
       },
     });
 
-    await reconcileOnStartup();
-    await sleep(200);
+    const result = await sweepDueSessions();
 
+    expect(result.ticked).toBe(1);
+    expect(result.autoStopped).toBe(0);
     const after = await getSession(API_KEY_ID, row.id as string);
     expect(after.state).toBe("RUNNING");
-    expect(after.totalSats).toBeGreaterThan(0); // the overdue tick fired
+    expect(after.totalSats).toBeGreaterThan(0);
   });
 
   it("auto-stops a RUNNING session that's been silent longer than the stale threshold", async () => {
@@ -302,11 +320,38 @@ describe("reconcileOnStartup", () => {
       },
     });
 
-    await reconcileOnStartup();
-    await sleep(50);
+    const result = await sweepDueSessions();
 
+    expect(result.ticked).toBe(0);
+    expect(result.autoStopped).toBe(1);
     const after = await getSession(API_KEY_ID, row.id as string);
     expect(after.state).toBe("FAILED");
-    expect(after.stopReason).toBe("orphaned_after_restart");
+    expect(after.stopReason).toBe("orphaned_after_downtime");
+  });
+
+  it("never ticks the same due session twice for one due tick, even if claimed concurrently", async () => {
+    const row = await fakePrisma.session.create({
+      data: {
+        apiKeyId: API_KEY_ID,
+        externalUserId: "user_1",
+        receiverPubkey: VALID_PUBKEY,
+        ratePerTickSats: 10,
+        tickIntervalSeconds: 1,
+        maxDurationSeconds: 3600,
+        maxTotalSats: 100_000,
+        state: "RUNNING",
+        totalSats: 0,
+        consecutiveFailures: 0,
+        startedAt: new Date(),
+        nextTickAt: new Date(Date.now() - 500),
+      },
+    });
+
+    // Two overlapping sweeps racing over the same due session.
+    await Promise.all([sweepDueSessions(), sweepDueSessions()]);
+
+    const after = await getSession(API_KEY_ID, row.id as string);
+    expect(after.totalSats).toBe(10); // billed exactly once, not twice
+    expect(fakePrisma.payment._rows).toHaveLength(1);
   });
 });
