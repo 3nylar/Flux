@@ -7,23 +7,29 @@ because the server re-checks session state immediately before every
 single payment.
 
 This is Project 01 from the original three-project brief, built as a
-fully documented, self-hostable API plus a real reference client — not
-just a demo UI wired directly to a database.
+fully documented, self-hostable API plus a complete reference app — sign
+in, start sessions, watch them bill live, review full history, check
+platform status — not just a demo widget wired directly to a database.
 
 ```
 api/   Fastify + TypeScript API — the actual product. Session state
        machine, pluggable Lightning backend, webhooks, OpenAPI docs.
-web/   Next.js reference client — a live interactive demo that calls the
-       API the way a real integration should (API key stays server-side).
+web/   Next.js app — full account system (email sign-in), a dashboard
+       with live sessions, history, receipts, and platform settings, all
+       built as a real client of the API over HTTP.
 ```
 
-## Why two folders
+## Why two folders, two databases
 
 The API is designed to be genuinely reusable infrastructure — something
 another developer deploys and integrates with, not just a backend for one
-frontend. The reference client exists to prove that contract: it's a real,
-separate application that only talks to the API over HTTP, the same way
-any third-party integrator would.
+frontend. The web app proves that contract by being a real, separate
+client: it has its own user accounts and its own database (for
+sign-in only), and talks to the Flux API purely over HTTP with one shared
+platform API key, exactly like any third-party integrator would. A
+session's `external_user_id` is what ties a web app account to "their"
+sessions in the API — the API itself has no idea the web app's accounts
+exist.
 
 ## Quickstart
 
@@ -41,36 +47,51 @@ Now running on `http://localhost:8081`, on the **simulated** Lightning
 backend by default — no real node required. Visit
 `http://localhost:8081/docs` for the interactive API reference.
 
-**2. Run the reference client:**
+**2. Run the web app** (its own separate Postgres, for its own accounts):
 ```bash
 cd web
 npm install
+docker compose up -d db
 cp .env.example .env.local
-# edit .env.local: paste the flx_test_... key from step 1 into FLUX_API_KEY
+# edit .env.local:
+#   - FLUX_API_KEY: the flx_test_... key from step 1
+#   - AUTH_SECRET: generate with `npx auth secret`
+#   - EMAIL_SERVER_*: your SMTP credentials (magic-link sign-in)
+npx prisma generate && npx prisma migrate deploy
 npm run dev
 ```
-Now running on `http://localhost:3000` — click "Start streaming" and watch
-a real session bill against the API you just started.
+Now running on `http://localhost:3000`. The homepage demo widget works
+immediately with no account. Sign in to unlock `/dashboard` — start a
+session there and it's saved to your real history.
 
 ## What's actually implemented
 
 - **The meter engine** — a race-safe session state machine with drift-free
   tick scheduling, server-enforced safety ceilings, a payment-failure
-  circuit breaker, and restart-safe reconciliation on boot. 20 passing
+  circuit breaker, and restart-safe reconciliation on boot. 22 passing
   tests cover these guarantees directly, including "no payment is ever
-  sent after stop" under real timing, not mocked time.
+  sent after stop" under real timing, and per-user session filtering.
 - **A pluggable Lightning backend** — ships with a fully working simulated
   provider (real preimage/hash generation, configurable failure rate) and
   a real LND REST provider built to LND's documented keysend contract.
 - **A documented REST + WebSocket API** — interactive reference at
   `/docs`, API-key auth, idempotency on every write, signed webhooks,
-  consistent error codes.
-- **Reusable infrastructure** — Docker Compose brings up the whole backend
-  with one command; `docs/EXTENDING.md` in the API folder maps out exactly
-  where to plug in horizontal scaling, real pub/sub, and webhook retries.
-- **A reference client that models correct integration** — the browser
-  never sees the API key; `web/app/api/flux/*` are thin server-side proxy
-  routes, the pattern any real product built on Flux should follow.
+  consistent error codes, per-user filtering for multi-tenant integrations.
+- **A full account system** — email magic-link sign-in (no wallet: Flux
+  pays *out* from the platform's own wallet, so there's nothing for an
+  end-user to connect), with dashboard, session history with CSV export,
+  per-session receipts with full payment breakdowns, and a settings page
+  showing live platform/node status and wallet balance.
+- **Correct multi-tenant proxy design** — every dashboard route checks
+  session ownership server-side (`canAccessSession` in `web/lib/fluxServer.ts`)
+  before returning or mutating anything, so one signed-in user can never
+  read or stop another user's session by guessing its ID. The public demo
+  widget still works with no account, scoped to its own reserved
+  `demo_visitor` identity so it never mixes with anyone's real history.
+- **Reusable infrastructure** — Docker Compose brings up each service's
+  database with one command; `docs/EXTENDING.md` in the API folder maps
+  out exactly where to plug in horizontal scaling, real pub/sub, and
+  webhook retries.
 
 ## Honest limitations
 
@@ -84,6 +105,10 @@ a real session bill against the API you just started.
   API processes yet — see `api/docs/EXTENDING.md` for the scaling path.
 - Webhook delivery is single-attempt with no retry/backoff yet (every
   attempt is still logged, so nothing is silently lost).
+- The web app's settings page shows session *defaults* (rate/interval)
+  stored in `localStorage`, not synced server-side per account — noted
+  explicitly in the UI copy so it isn't mistaken for a persisted setting.
 
-See `api/README.md` for the full picture, including deployment
-instructions, security notes, and the complete project structure.
+See `api/README.md` for the full picture on the API side, including
+deployment instructions, security notes, and the complete project
+structure.

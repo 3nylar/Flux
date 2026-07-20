@@ -1,0 +1,22 @@
+name: flux-web
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: flux_web
+      POSTGRES_PASSWORD: flux_web
+      POSTGRES_DB: flux_web
+    ports:
+      - "5434:5432"
+    volumes:
+      - flux_web_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flux_web"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  flux_web_pgdata:

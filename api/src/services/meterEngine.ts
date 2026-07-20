@@ -128,19 +128,30 @@ export async function getSession(apiKeyId: string, sessionId: string): Promise<S
   return session;
 }
 
+export interface ListSessionsFilters {
+  externalUserId?: string;
+  state?: string;
+}
+
 export async function listSessions(
   apiKeyId: string,
   limit: number,
-  offset: number
+  offset: number,
+  filters: ListSessionsFilters = {}
 ): Promise<{ sessions: Session[]; total: number }> {
+  const where = {
+    apiKeyId,
+    ...(filters.externalUserId ? { externalUserId: filters.externalUserId } : {}),
+    ...(filters.state ? { state: filters.state.toUpperCase() as never } : {}),
+  };
   const [sessions, total] = await Promise.all([
     prisma.session.findMany({
-      where: { apiKeyId },
+      where,
       orderBy: { createdAt: "desc" },
       take: limit,
       skip: offset,
     }),
-    prisma.session.count({ where: { apiKeyId } }),
+    prisma.session.count({ where }),
   ]);
   return { sessions, total };
 }

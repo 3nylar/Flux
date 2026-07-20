@@ -153,6 +153,13 @@ paths:
         - name: offset
           in: query
           schema: { type: integer, default: 0, minimum: 0 }
+        - name: external_user_id
+          in: query
+          schema: { type: string }
+          description: Filter to sessions belonging to a specific end-user. Essential for multi-tenant integrations sharing one API key.
+        - name: state
+          in: query
+          schema: { type: string, enum: [created, running, degraded, stopping, stopped, failed] }
       responses:
         "200":
           description: A page of sessions.

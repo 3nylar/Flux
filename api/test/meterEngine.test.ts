@@ -5,7 +5,7 @@ const fakePrisma = createFakePrisma();
 
 vi.mock("../src/lib/prisma.js", () => ({ prisma: fakePrisma }));
 
-const { startSession, stopSession, getSession, reconcileOnStartup, __clearAllTimersForTests } =
+const { startSession, stopSession, getSession, listSessions, reconcileOnStartup, __clearAllTimersForTests } =
   await import("../src/services/meterEngine.js");
 const { __setLightningProviderForTests } = await import("../src/providers/index.js");
 const { SimulatedLightningProvider } = await import(
@@ -198,6 +198,61 @@ describe("payment failure handling (circuit breaker)", () => {
     expect(final.totalSats).toBe(0); // no successful payments were ever recorded
     const failedPayments = fakePrisma.payment._rows.filter((p) => p.status === "FAILED");
     expect(failedPayments.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("listSessions filtering", () => {
+  it("filters by externalUserId -- required for a multi-tenant app sharing one API key", async () => {
+    await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "alice",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 100, // long enough that no tick fires during the test
+    });
+    await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "bob",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 100,
+    });
+
+    const { sessions: aliceSessions, total: aliceTotal } = await listSessions(
+      API_KEY_ID,
+      20,
+      0,
+      { externalUserId: "alice" }
+    );
+    expect(aliceTotal).toBe(1);
+    expect(aliceSessions).toHaveLength(1);
+    expect(aliceSessions[0]!.externalUserId).toBe("alice");
+
+    const { total: allTotal } = await listSessions(API_KEY_ID, 20, 0);
+    expect(allTotal).toBe(2);
+  });
+
+  it("filters by state", async () => {
+    const s1 = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "carol",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 100,
+    });
+    await stopSession(API_KEY_ID, s1.id);
+    await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "carol",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 100,
+    });
+
+    const { sessions: running } = await listSessions(API_KEY_ID, 20, 0, { state: "running" });
+    const { sessions: stopped } = await listSessions(API_KEY_ID, 20, 0, { state: "stopped" });
+    expect(running.every((s) => s.state === "RUNNING")).toBe(true);
+    expect(stopped.every((s) => s.state === "STOPPED")).toBe(true);
   });
 });
 

@@ -45,7 +45,10 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     { preHandler: [authenticate, requireScope("sessions:read")] },
     async (req) => {
       const q = parseOrThrow(listSessionsQuerySchema, req.query);
-      const { sessions, total } = await listSessions(req.apiKey!.id, q.limit, q.offset);
+      const { sessions, total } = await listSessions(req.apiKey!.id, q.limit, q.offset, {
+        externalUserId: q.external_user_id,
+        state: q.state,
+      });
       return {
         data: sessions.map(serializeSession),
         pagination: { total, limit: q.limit, offset: q.offset },

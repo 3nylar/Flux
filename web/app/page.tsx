@@ -1,30 +1,14 @@
 import { MeterWidget } from "@/components/MeterWidget";
-import { Zap, ShieldCheck, Code2, RefreshCw } from "lucide-react";
-
-const FLUX_API_URL = process.env.NEXT_PUBLIC_FLUX_API_URL || "http://localhost:8081";
+import { Navbar } from "@/components/landing/Navbar";
+import { HowItWorks } from "@/components/landing/HowItWorks";
+import { FAQ } from "@/components/landing/FAQ";
+import { Footer } from "@/components/landing/Footer";
+import { ShieldCheck, Code2, RefreshCw, Zap } from "lucide-react";
 
 export default function HomePage() {
   return (
     <>
-      <header className="border-b border-line-soft">
-        <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2 font-display font-semibold text-lg">
-            <span className="w-8 h-8 rounded-lg gradient-primary-btn flex items-center justify-center text-[#1a0f05]">
-              <Zap size={16} strokeWidth={2.4} />
-            </span>
-            Flux
-          </div>
-          <a
-            href={`${FLUX_API_URL}/docs`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm text-ink-soft hover:text-ink transition-colors"
-          >
-            API Reference ↗
-          </a>
-        </div>
-      </header>
-
+      <Navbar />
       <main className="flex-1 gradient-trust">
         <div className="max-w-6xl mx-auto px-6 py-16 md:py-24 grid md:grid-cols-2 gap-16 items-start">
           <div>
@@ -38,41 +22,19 @@ export default function HomePage() {
             </p>
 
             <div className="mt-10 grid sm:grid-cols-2 gap-5">
-              <Feature
-                icon={RefreshCw}
-                title="Real streaming payments"
-                text="One Lightning keysend payment per tick interval, for as long as you let it run."
-              />
-              <Feature
-                icon={ShieldCheck}
-                title="Stop is instant"
-                text="Server-side state re-checked before every payment — nothing sent after stop."
-              />
-              <Feature
-                icon={Code2}
-                title="Fully documented API"
-                text="REST + WebSocket, API keys, webhooks, idempotency. See the reference."
-              />
-              <Feature
-                icon={Zap}
-                title="Zero setup to try"
-                text="Runs on a simulated Lightning backend by default — no node required."
-              />
+              <Feature icon={RefreshCw} title="Real streaming payments" text="One Lightning keysend payment per tick interval, for as long as you let it run." />
+              <Feature icon={ShieldCheck} title="Stop is instant" text="Server-side state re-checked before every payment — nothing sent after stop." />
+              <Feature icon={Code2} title="Fully documented API" text="REST + WebSocket, API keys, webhooks, idempotency. See the reference." />
+              <Feature icon={Zap} title="Zero setup to try" text="Runs on a simulated Lightning backend by default — no node required." />
             </div>
 
             <p className="mt-10 text-sm text-ink-faint">
-              This page is a reference client of the{" "}
-              <a
-                href={`${FLUX_API_URL}/docs`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-primary hover:underline"
-              >
-                Flux API
+              This page is a reference client of the Flux API — it calls a
+              server-side proxy so the API key never reaches your browser.{" "}
+              <a href="/login" className="text-primary hover:underline">
+                Sign in
               </a>{" "}
-              — it calls a server-side proxy so the API key never reaches
-              your browser, exactly the pattern a real integration should
-              follow.
+              to save your sessions to a real history.
             </p>
           </div>
 
@@ -80,15 +42,11 @@ export default function HomePage() {
             <MeterWidget />
           </div>
         </div>
-      </main>
 
-      <footer className="border-t border-line-soft">
-        <div className="max-w-6xl mx-auto px-6 py-8 text-center text-sm text-ink-faint">
-          Educational reference implementation. Runs on a simulated
-          Lightning backend by default — no real sats are ever involved
-          unless you explicitly connect a real node.
-        </div>
-      </footer>
+        <HowItWorks />
+        <FAQ />
+      </main>
+      <Footer />
     </>
   );
 }

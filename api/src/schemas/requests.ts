@@ -22,6 +22,8 @@ export const stopSessionSchema = z.object({
 export const listSessionsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   offset: z.coerce.number().int().min(0).default(0),
+  external_user_id: externalUserIdSchema.optional(),
+  state: z.enum(["created", "running", "degraded", "stopping", "stopped", "failed"]).optional(),
 });
 
 export const createWebhookSchema = z.object({

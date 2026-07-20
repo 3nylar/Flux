@@ -40,6 +40,23 @@ export function MeterWidget() {
     };
   }, []);
 
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("flux:default-session-prefs");
+      if (raw) {
+        const prefs = JSON.parse(raw);
+        // Syncing initial state from localStorage (an external store) on
+        // mount is exactly the documented use case for this pattern.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        if (prefs.rate) setRate(String(prefs.rate));
+        if (prefs.interval) setInterval_(String(prefs.interval));
+      }
+    } catch {
+      // localStorage unavailable or malformed -- fall back to the defaults
+      // already set above.
+    }
+  }, []);
+
   async function handleStart() {
     setError(null);
     setPhase("starting");
