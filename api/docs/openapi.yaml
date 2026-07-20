@@ -1,0 +1,421 @@
+openapi: 3.1.0
+info:
+  title: Flux API
+  version: "1.0.0"
+  description: >
+    Flux lets you meter continuous, stoppable-anytime payments over the
+    Lightning Network — a taxi meter for money. Start a session against a
+    receiver's Lightning node, and Flux fires one keysend payment per tick
+    interval for as long as the session runs. Stop it at any moment and
+    billing halts within one tick, guaranteed: no payment is ever sent
+    after a stop is acknowledged.
+
+
+    Flux ships with a **simulated Lightning backend** by default, so you
+    can build a complete integration — start a session, watch it bill,
+    stop it, replay the payment history — without running a real
+    Lightning node. Point it at a real LND node
+    (`LIGHTNING_PROVIDER=lnd`) when you're ready to go live.
+  contact:
+    name: Flux Developer Support
+    url: https://flux.dev/support
+  license:
+    name: MIT
+servers:
+  - url: https://api.flux.dev
+    description: Hosted API
+  - url: http://localhost:8081
+    description: Local development
+security:
+  - ApiKeyAuth: []
+tags:
+  - name: Sessions
+    description: Start, stop, and monitor metered payment sessions.
+  - name: Payments
+    description: The per-tick payment audit trail for a session.
+  - name: Webhooks
+    description: Register endpoints to receive session/payment lifecycle events.
+  - name: Meta
+    description: Service metadata, health, and wallet balance.
+paths:
+  /health:
+    get:
+      tags: [Meta]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+  /v1/meta:
+    get:
+      tags: [Meta]
+      summary: Deployment metadata
+      description: >
+        Which Lightning backend this instance is running, whether the node
+        is currently reachable, and the server-enforced safety ceilings
+        every session is subject to regardless of what a client requests.
+      security: []
+      responses:
+        "200":
+          description: Metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      lightning_provider: { type: string, enum: [simulated, lnd] }
+                      node_reachable: { type: boolean }
+                      wallet_balance_sats: { type: integer, nullable: true }
+                      max_session_duration_seconds: { type: integer }
+                      max_total_sats_per_session: { type: integer }
+                      min_tick_interval_seconds: { type: integer }
+  /v1/wallet/balance:
+    get:
+      tags: [Meta]
+      summary: Current platform wallet balance
+      responses:
+        "200":
+          description: Balance in satoshis.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      balance_sats: { type: integer }
+                      provider: { type: string }
+  /v1/sessions:
+    post:
+      tags: [Sessions]
+      summary: Start a session
+      description: >
+        Starts a metered payment session. Flux immediately begins sending
+        one keysend payment of `rate_per_tick_sats` every
+        `tick_interval_seconds` to `receiver_pubkey`, until the session is
+        stopped or a server-enforced safety ceiling is reached.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [external_user_id, receiver_pubkey, rate_per_tick_sats, tick_interval_seconds]
+              properties:
+                external_user_id:
+                  type: string
+                  example: user_12345
+                  description: Your own stable identifier for whoever this session bills.
+                receiver_pubkey:
+                  type: string
+                  example: "02f6725f9c1c40333b67faea92fd211c183050f28df32cbaab5d5644b1e50496a"
+                  description: 33-byte compressed secp256k1 public key of the receiving Lightning node.
+                rate_per_tick_sats:
+                  type: integer
+                  minimum: 1
+                  example: 10
+                tick_interval_seconds:
+                  type: integer
+                  minimum: 1
+                  example: 5
+                max_duration_seconds:
+                  type: integer
+                  description: Optional. Clamped to this server's configured ceiling if higher.
+                max_total_sats:
+                  type: integer
+                  description: Optional. Clamped to this server's configured ceiling if higher.
+      responses:
+        "201":
+          description: Session started.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    get:
+      tags: [Sessions]
+      summary: List sessions
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        "200":
+          description: A page of sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Session" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+  /v1/sessions/{id}:
+    get:
+      tags: [Sessions]
+      summary: Get a session
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/sessions/{id}/stop:
+    post:
+      tags: [Sessions]
+      summary: Stop a session
+      description: >
+        Stops billing immediately. Guaranteed: no payment is ever sent
+        after this call is acknowledged, even if a tick was already
+        in-flight — the meter engine re-checks session state immediately
+        before every payment. Idempotent: stopping an already-stopped
+        session just returns it.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, example: user_clicked_stop }
+      responses:
+        "200":
+          description: Session stopped.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionResponse" }
+  /v1/sessions/{id}/payments:
+    get:
+      tags: [Payments]
+      summary: List a session's payments
+      description: The full per-tick audit trail, including failed attempts.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: A page of payments.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Payment" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+  /v1/sessions/{id}/stream:
+    get:
+      tags: [Sessions]
+      summary: Live session updates (WebSocket)
+      description: >
+        Upgrade to a WebSocket for live push updates as the session's total
+        and state change, instead of polling `GET /v1/sessions/{id}`.
+        Since browsers' native WebSocket API can't set custom headers,
+        authenticate by passing your API key as a query parameter on this
+        one endpoint: `?api_key=flx_test_...`.
+
+
+        On connect you immediately receive a `session.snapshot` message,
+        then a `session.update` message every time the total or state
+        changes, until the session reaches a terminal state (`stopped` or
+        `failed`), at which point the socket closes.
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: api_key
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "101":
+          description: Switching protocols to WebSocket.
+  /v1/webhooks:
+    post:
+      tags: [Webhooks]
+      summary: Register a webhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url: { type: string, format: uri, example: "https://yourapp.com/webhooks/flux" }
+                events:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      [session.started, payment.sent, payment.failed, session.stopped, session.autostopped]
+      responses:
+        "201":
+          description: >
+            Webhook registered. The `secret` field is shown exactly once —
+            store it to verify the `Flux-Signature` header on incoming
+            deliveries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      url: { type: string }
+                      events: { type: array, items: { type: string } }
+                      secret: { type: string, example: "whsec_..." }
+                      created_at: { type: string, format: date-time }
+    get:
+      tags: [Webhooks]
+      summary: List webhooks
+      responses:
+        "200":
+          description: Registered webhooks (secrets not included).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        url: { type: string }
+                        events: { type: array, items: { type: string } }
+                        disabled: { type: boolean }
+                        created_at: { type: string, format: date-time }
+  /v1/webhooks/{id}:
+    delete:
+      tags: [Webhooks]
+      summary: Disable a webhook
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Webhook disabled.
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      description: >
+        Pass your API key as a bearer token:
+        `Authorization: Bearer flx_test_...`. An `X-API-Key` header is
+        also accepted.
+  parameters:
+    SessionId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+      description: >
+        A unique string (e.g. a UUID) that makes a retried POST safe.
+        Essential for `POST /v1/sessions`: a client that times out and
+        retries must not accidentally start a second billing session.
+  responses:
+    BadRequest:
+      description: The request was malformed or failed validation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Session:
+      type: object
+      properties:
+        id: { type: string }
+        external_user_id: { type: string }
+        receiver_pubkey: { type: string }
+        rate_per_tick_sats: { type: integer }
+        tick_interval_seconds: { type: integer }
+        max_duration_seconds: { type: integer }
+        max_total_sats: { type: integer }
+        state:
+          type: string
+          enum: [created, running, degraded, stopping, stopped, failed]
+        total_sats: { type: integer }
+        consecutive_failures: { type: integer }
+        stop_reason: { type: string, nullable: true }
+        started_at: { type: string, format: date-time, nullable: true }
+        stopped_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SessionResponse:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/Session" }
+    Payment:
+      type: object
+      properties:
+        id: { type: string }
+        amount_sats: { type: integer }
+        status: { type: string, enum: [succeeded, failed] }
+        payment_hash: { type: string, nullable: true }
+        fee_sats: { type: integer, nullable: true }
+        failure_reason: { type: string, nullable: true }
+        attempted_at: { type: string, format: date-time }
+    Pagination:
+      type: object
+      properties:
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: rate_too_low }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  issue: { type: string }
+            request_id: { type: string }
+            docs_url: { type: string }

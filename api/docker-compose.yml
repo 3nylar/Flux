@@ -1,0 +1,51 @@
+name: flux
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: flux
+      POSTGRES_PASSWORD: flux
+      POSTGRES_DB: flux
+    ports:
+      - "5433:5432"
+    volumes:
+      - flux_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flux"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://flux:flux@db:5432/flux
+      LIGHTNING_PROVIDER: ${LIGHTNING_PROVIDER:-simulated}
+      LND_REST_URL: ${LND_REST_URL:-}
+      LND_MACAROON_HEX: ${LND_MACAROON_HEX:-}
+      LND_TLS_CERT_BASE64: ${LND_TLS_CERT_BASE64:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8081}
+    command: >
+      sh -c "npx prisma migrate deploy && node dist/server.js"
+
+  # Optional lightweight DB browser -- handy when developing locally.
+  # Visit http://localhost:8082 (system: PostgreSQL, server: db, user/pass: flux/flux).
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    depends_on:
+      - db
+    ports:
+      - "8082:8080"
+
+volumes:
+  flux_pgdata:

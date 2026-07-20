@@ -1,0 +1,10 @@
+process.env.NODE_ENV = "test";
+process.env.DATABASE_URL = "postgresql://test:test@localhost:5432/flux_test";
+process.env.LIGHTNING_PROVIDER = "simulated";
+process.env.SIM_FAILURE_RATE = "0";
+process.env.SIM_LATENCY_MS = "1";
+process.env.MAX_SESSION_DURATION_SECONDS = "3600";
+process.env.MAX_TOTAL_SATS_PER_SESSION = "100000";
+process.env.MIN_TICK_INTERVAL_SECONDS = "1";
+process.env.MAX_CONSECUTIVE_PAYMENT_FAILURES = "3";
+process.env.STALE_SESSION_TIMEOUT_SECONDS = "120";

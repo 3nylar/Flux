@@ -1,0 +1,257 @@
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { createFakePrisma } from "./fakePrisma.js";
+
+const fakePrisma = createFakePrisma();
+
+vi.mock("../src/lib/prisma.js", () => ({ prisma: fakePrisma }));
+
+const { startSession, stopSession, getSession, reconcileOnStartup, __clearAllTimersForTests } =
+  await import("../src/services/meterEngine.js");
+const { __setLightningProviderForTests } = await import("../src/providers/index.js");
+const { SimulatedLightningProvider } = await import(
+  "../src/providers/SimulatedLightningProvider.js"
+);
+
+const API_KEY_ID = "key_1";
+const VALID_PUBKEY = "02" + "ab".repeat(32);
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+beforeEach(() => {
+  fakePrisma.session._rows.length = 0;
+  fakePrisma.payment._rows.length = 0;
+  fakePrisma.webhook._rows.length = 0;
+  __setLightningProviderForTests(
+    new SimulatedLightningProvider({ failureRate: 0, latencyMs: 1 })
+  );
+});
+
+afterEach(() => {
+  __clearAllTimersForTests();
+});
+
+describe("startSession", () => {
+  it("creates a RUNNING session and begins billing on the configured cadence", async () => {
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 1,
+    });
+
+    expect(session.state).toBe("RUNNING");
+    expect(session.totalSats).toBe(0);
+
+    // Let the first tick (scheduled at delay 0) fire.
+    await sleep(150);
+
+    const updated = await getSession(API_KEY_ID, session.id);
+    expect(updated.totalSats).toBe(10);
+    expect(fakePrisma.payment._rows).toHaveLength(1);
+    expect(fakePrisma.payment._rows[0]!.status).toBe("SUCCEEDED");
+  });
+
+  it("rejects a malformed receiver pubkey before creating any session", async () => {
+    await expect(
+      startSession({
+        apiKeyId: API_KEY_ID,
+        externalUserId: "user_1",
+        receiverPubkey: "not-a-pubkey",
+        ratePerTickSats: 10,
+        tickIntervalSeconds: 1,
+      })
+    ).rejects.toThrow();
+    expect(fakePrisma.session._rows).toHaveLength(0);
+  });
+
+  it("clamps client-requested caps to the server-configured maximums", async () => {
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 1,
+      maxDurationSeconds: 999_999_999, // absurdly large
+      maxTotalSats: 999_999_999,
+    });
+    // test/setup.ts sets MAX_SESSION_DURATION_SECONDS=3600, MAX_TOTAL_SATS_PER_SESSION=100000
+    expect(session.maxDurationSeconds).toBe(3600);
+    expect(session.maxTotalSats).toBe(100_000);
+  });
+});
+
+describe("stopSession", () => {
+  it("stops billing immediately -- no payment is sent after stop", async () => {
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 1,
+    });
+
+    // Stop synchronously, before the delay-0 first tick has a chance to run.
+    const stopped = await stopSession(API_KEY_ID, session.id);
+    expect(stopped.state).toBe("STOPPED");
+
+    // Wait well past when a tick (or several) would have fired if billing
+    // had continued.
+    await sleep(1200);
+
+    const final = await getSession(API_KEY_ID, session.id);
+    expect(final.totalSats).toBe(0);
+    expect(fakePrisma.payment._rows).toHaveLength(0);
+  });
+
+  it("is idempotent -- stopping an already-stopped session just returns it", async () => {
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 1,
+    });
+    await stopSession(API_KEY_ID, session.id);
+    const secondStop = await stopSession(API_KEY_ID, session.id);
+    expect(secondStop.state).toBe("STOPPED");
+  });
+
+  it("stops a session that has already been running and billing", async () => {
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 1,
+    });
+    await sleep(150); // let the first tick land
+    await stopSession(API_KEY_ID, session.id);
+    const totalAtStop = (await getSession(API_KEY_ID, session.id)).totalSats;
+    expect(totalAtStop).toBeGreaterThan(0);
+
+    await sleep(1200); // past when a second tick would fire
+    const final = await getSession(API_KEY_ID, session.id);
+    expect(final.totalSats).toBe(totalAtStop); // unchanged after stop
+  });
+});
+
+describe("safety ceilings", () => {
+  it("auto-stops once maxTotalSats would be exceeded by the next tick", async () => {
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 40,
+      tickIntervalSeconds: 1,
+      maxTotalSats: 100, // allows at most 2 ticks (40 + 40 = 80; a 3rd would hit 120 > 100)
+    });
+
+    await sleep(4000); // enough real time for ~2-3 tick cycles with margin
+
+    const final = await getSession(API_KEY_ID, session.id);
+    expect(final.state).toBe("FAILED");
+    expect(final.stopReason).toBe("max_total_sats_reached");
+    expect(final.totalSats).toBeLessThanOrEqual(100);
+  });
+
+  it("auto-stops once maxDurationSeconds has elapsed", async () => {
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 1,
+      tickIntervalSeconds: 1,
+      maxDurationSeconds: 1,
+    });
+
+    await sleep(3500);
+
+    const final = await getSession(API_KEY_ID, session.id);
+    expect(final.state).toBe("FAILED");
+    expect(final.stopReason).toBe("max_duration_reached");
+  });
+});
+
+describe("payment failure handling (circuit breaker)", () => {
+  it("auto-stops after MAX_CONSECUTIVE_PAYMENT_FAILURES consecutive failures", async () => {
+    __setLightningProviderForTests(
+      new SimulatedLightningProvider({ failureRate: 1, latencyMs: 1 }) // always fails
+    );
+
+    const session = await startSession({
+      apiKeyId: API_KEY_ID,
+      externalUserId: "user_1",
+      receiverPubkey: VALID_PUBKEY,
+      ratePerTickSats: 10,
+      tickIntervalSeconds: 1,
+    });
+
+    // test/setup.ts sets MAX_CONSECUTIVE_PAYMENT_FAILURES=3
+    await sleep(3600);
+
+    const final = await getSession(API_KEY_ID, session.id);
+    expect(final.state).toBe("FAILED");
+    expect(final.stopReason).toContain("payment_failures_exceeded");
+    expect(final.totalSats).toBe(0); // no successful payments were ever recorded
+    const failedPayments = fakePrisma.payment._rows.filter((p) => p.status === "FAILED");
+    expect(failedPayments.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe("reconcileOnStartup", () => {
+  it("resumes a RUNNING session whose next tick is recent", async () => {
+    const row = await fakePrisma.session.create({
+      data: {
+        apiKeyId: API_KEY_ID,
+        externalUserId: "user_1",
+        receiverPubkey: VALID_PUBKEY,
+        ratePerTickSats: 10,
+        tickIntervalSeconds: 1,
+        maxDurationSeconds: 3600,
+        maxTotalSats: 100_000,
+        state: "RUNNING",
+        totalSats: 0,
+        consecutiveFailures: 0,
+        startedAt: new Date(),
+        nextTickAt: new Date(Date.now() - 500), // slightly overdue, well within stale threshold
+      },
+    });
+
+    await reconcileOnStartup();
+    await sleep(200);
+
+    const after = await getSession(API_KEY_ID, row.id as string);
+    expect(after.state).toBe("RUNNING");
+    expect(after.totalSats).toBeGreaterThan(0); // the overdue tick fired
+  });
+
+  it("auto-stops a RUNNING session that's been silent longer than the stale threshold", async () => {
+    // test/setup.ts sets STALE_SESSION_TIMEOUT_SECONDS=120
+    const row = await fakePrisma.session.create({
+      data: {
+        apiKeyId: API_KEY_ID,
+        externalUserId: "user_1",
+        receiverPubkey: VALID_PUBKEY,
+        ratePerTickSats: 10,
+        tickIntervalSeconds: 1,
+        maxDurationSeconds: 3600,
+        maxTotalSats: 100_000,
+        state: "RUNNING",
+        totalSats: 50,
+        consecutiveFailures: 0,
+        startedAt: new Date(Date.now() - 10 * 60 * 1000),
+        nextTickAt: new Date(Date.now() - 10 * 60 * 1000), // 10 minutes overdue
+      },
+    });
+
+    await reconcileOnStartup();
+    await sleep(50);
+
+    const after = await getSession(API_KEY_ID, row.id as string);
+    expect(after.state).toBe("FAILED");
+    expect(after.stopReason).toBe("orphaned_after_restart");
+  });
+});

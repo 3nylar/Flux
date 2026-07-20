@@ -1,0 +1,155 @@
+// Prisma schema for the Flux streaming-sats API.
+//
+// Postgres only, for the same reason documented in the Auctra/Bitpool
+// projects: this is server infrastructure meant for real hosting, and a
+// SQLite file does not survive on serverless/ephemeral filesystems.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// An API key issued to an integrator. Only a SHA-256 hash of the raw key
+/// is ever stored -- see the companion Auctra API for the identical pattern
+/// and rationale.
+model ApiKey {
+  id         String    @id @default(cuid())
+  keyHash    String    @unique
+  keyPrefix  String
+  name       String
+  scopes     String[]
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+
+  sessions        Session[]
+  webhooks        Webhook[]
+  idempotencyKeys IdempotencyKey[]
+
+  @@index([keyHash])
+}
+
+enum SessionState {
+  CREATED
+  RUNNING
+  DEGRADED
+  STOPPING
+  STOPPED
+  FAILED
+}
+
+/// A single "meter" session: continuous keysend payments from the platform's
+/// Lightning node to a receiver, billed on a fixed tick interval, stoppable
+/// at any moment. This is the core domain object of the whole product --
+/// see src/services/meterEngine.ts for the state machine that drives it.
+model Session {
+  id                    String       @id @default(cuid())
+  apiKeyId              String
+  externalUserId        String
+  receiverPubkey        String
+  ratePerTickSats       Int
+  tickIntervalSeconds   Int
+  maxDurationSeconds    Int
+  maxTotalSats          Int
+  state                 SessionState @default(CREATED)
+  totalSats             Int          @default(0)
+  consecutiveFailures   Int          @default(0)
+  lastTickAt            DateTime?
+  nextTickAt            DateTime?
+  stopReason            String?
+  startedAt             DateTime?
+  stoppedAt             DateTime?
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  apiKey   ApiKey    @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  payments Payment[]
+
+  @@index([apiKeyId])
+  @@index([state, nextTickAt])
+}
+
+enum PaymentStatus {
+  SUCCEEDED
+  FAILED
+}
+
+/// A single keysend payment attempt within a session -- the audit trail
+/// that makes the total billed amount independently verifiable.
+model Payment {
+  id            String        @id @default(cuid())
+  sessionId     String
+  amountSats    Int
+  status        PaymentStatus
+  paymentHash   String?
+  preimage      String?
+  feeSats       Int?
+  failureReason String?
+  attemptedAt   DateTime      @default(now())
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+/// A webhook endpoint an integrator has registered to receive session /
+/// payment lifecycle events.
+model Webhook {
+  id         String    @id @default(cuid())
+  apiKeyId   String
+  url        String
+  /// Event names this endpoint wants, e.g. ["session.stopped", "payment.failed"].
+  events     String[]
+  secret     String
+  createdAt  DateTime  @default(now())
+  disabledAt DateTime?
+
+  apiKey    ApiKey           @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([apiKeyId])
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+/// Delivery attempt log for webhooks, so integrators (and we) can debug a
+/// missed event instead of it silently vanishing.
+model WebhookDelivery {
+  id           String         @id @default(cuid())
+  webhookId    String
+  eventType    String
+  payload      Json
+  status       DeliveryStatus @default(PENDING)
+  responseCode Int?
+  attempts     Int            @default(0)
+  createdAt    DateTime       @default(now())
+  deliveredAt  DateTime?
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+}
+
+/// Idempotency records, identical pattern to the Auctra API.
+model IdempotencyKey {
+  id           String   @id @default(cuid())
+  apiKeyId     String
+  key          String
+  requestHash  String
+  responseBody Json
+  responseCode Int
+  createdAt    DateTime @default(now())
+
+  apiKey ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@unique([apiKeyId, key])
+  @@index([apiKeyId, key])
+}

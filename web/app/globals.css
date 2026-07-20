@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+:root {
+  /* Flux: dark, energetic, "streaming sats" -- distinct from the softer
+     Bitpool (light blue/teal) and Auctra (dark navy/gold) palettes. */
+  --canvas: #0b0d10;
+  --canvas-alt: #14171c;
+  --surface: #171a1f;
+  --ink: #f2f4f7;
+  --ink-soft: #9aa1ac;
+  --ink-faint: #656c78;
+  --line: #262a31;
+  --line-soft: #1d2027;
+
+  --primary: #ff8a3d;
+  --primary-dark: #e56a1f;
+  --primary-soft: #ff8a3d22;
+
+  --accent: #22d3ee;
+  --accent-soft: #22d3ee1f;
+
+  --success: #34d399;
+  --success-soft: #34d39920;
+  --danger: #f87171;
+  --danger-soft: #f8717120;
+  --amber: #fbbf24;
+  --amber-soft: #fbbf2420;
+
+  --shadow-soft: 0 1px 2px rgba(0,0,0,0.3), 0 4px 20px rgba(0,0,0,0.25);
+  --shadow-lifted: 0 12px 32px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.3);
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-canvas-alt: var(--canvas-alt);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-faint: var(--ink-faint);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-primary: var(--primary);
+  --color-primary-dark: var(--primary-dark);
+  --color-primary-soft: var(--primary-soft);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-amber: var(--amber);
+  --color-amber-soft: var(--amber-soft);
+
+  --font-display: var(--font-sora);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains);
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+.font-display { font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif; }
+.font-mono-num { font-family: var(--font-mono), ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+
+.gradient-trust {
+  background: radial-gradient(ellipse 80% 60% at 50% -10%, #ff8a3d16, transparent), var(--canvas);
+}
+.gradient-primary-btn { background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@keyframes tick-flash {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.03); }
+  100% { transform: scale(1); }
+}
+.animate-tick-flash { animation: tick-flash 0.4s ease-out; }
+
+@keyframes flow {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+.animate-flow {
+  background: linear-gradient(90deg, var(--primary), var(--accent), var(--primary));
+  background-size: 200% 100%;
+  animation: flow 3s linear infinite;
+}
+
+:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
