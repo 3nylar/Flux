@@ -1,0 +1,23 @@
+name: Flux tick scheduler
+
+# Drives billing ticks for the Vercel deployment of api/, which has no
+# persistent process of its own. Vercel's own Cron is limited to once a
+# day on the Hobby plan, so this workflow calls the tick endpoint instead,
+# on the shortest interval GitHub Actions schedules reliably support.
+#
+# Requires a repo secret CRON_SECRET matching the api/ deployment's
+# CRON_SECRET env var (Vercel project settings -> Environment Variables).
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call POST /internal/tick
+        run: |
+          curl -sS -X POST "https://flux-api-coral.vercel.app/internal/tick" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            --fail-with-body
